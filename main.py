@@ -24,9 +24,31 @@ import matplotlib.pyplot as plt
 
 class GNNStack(nn.Module):
 
-    def __init__(self, input_dim, hidden_dim, output_dim, task='node'):
+    def __init__(self, input_dim, hidden_dim, output_dim, lp_path_num, lp_length, lp_dim, ns_length, ns_dim, task='node'):
+        """
+        :param input_dim: max(dataset.num_node_features, 1)
+        :param hidden_dim: 32
+        :param output_dim: dataset.num_classes
+        :param task: 'node' or 'graph'
+        """
         super(GNNStack, self).__init__()
         self.task = task
+
+
+        # LP: (lp_path_num, lp_length, lp_dim)
+        self.lp_conv1 = nn.Conv2d(lp_path_num, 6, kernel_size=5, padding=2) # (6, lp_length, lp_dim)
+        self.lp_pool1 = nn.MaxPool2d(2, 2)
+        self.lp_conv2 = nn.Conv2d(6, 16, kernel_size=5, padding=2) # (16, lp_length / 2, lp_dim / 2)
+        self.lp_pool2 = nn.MaxPool2d(2, 2)
+        self.lp_fc = nn.Linear(16 * (lp_length/4) * (lp_dim/4), 128)
+
+        # NS: (1, ns_length, ns_dim)
+        self.ns_conv1 = nn.Conv2d(1, 6, kernel_size=5, padding=2)  # (6, ns_length, ns_dim)
+        self.ns_pool1 = nn.MaxPool2d(2, 2)
+        self.ns_conv2 = nn.Conv2d(6, 16, kernel_size=5, padding=2)  # (16, ns_length / 2, ns_dim / 2)
+        self.ns_pool2 = nn.MaxPool2d(2, 2)
+        self.ns_fc = nn.Linear(16 * (ns_length / 4) * (ns_dim / 4), 128)
+
         self.convs = nn.ModuleList()
         self.convs.append(self.build_conv_model(input_dim, hidden_dim))
         self.lns = nn.ModuleList()
@@ -43,7 +65,7 @@ class GNNStack(nn.Module):
             raise RuntimeError('Unknown task.')
 
         self.dropout = 0.25
-        self.num_layers = 3
+        self.num_layers = 3 # len of self.convs
 
     def build_conv_model(self, input_dim, hidden_dim):
         # refer to pytorch geometric nn module for different implementation of GNNs.
@@ -54,13 +76,27 @@ class GNNStack(nn.Module):
                                   nn.ReLU(), nn.Linear(hidden_dim, hidden_dim)))
 
     def forward(self, data):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-        if data.num_node_features == 0:
-          x = torch.ones(data.num_nodes, 1)
+        # x: [2265, 3]
+        # edge_index: [2, 8468]
+        # batch: 2265
+        xs, edge_index, batch = data.xs, data.edge_index, data.batch
+        # if data.num_node_features == 0:
+        #   x = torch.ones(data.num_nodes, 1)
+
+        # TODO: combine DEF, REF, PDT, LP, NS --> x
+        x_pdt = xs['pdt']
+        x_ref = xs['ref']
+        x_def = xs['def']
+        x_lp = xs['lp']
+        x_ns = xs['ns']
+
+
+
 
         for i in range(self.num_layers):
             x = self.convs[i](x, edge_index)
             emb = x
+            # emb: [2265, 32]
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
             if not i == self.num_layers - 1:
@@ -71,7 +107,7 @@ class GNNStack(nn.Module):
 
         x = self.post_mp(x)
 
-        return emb, F.log_softmax(x, dim=1)
+        return emb, F.log_softmax(x, dim=1) # dim (int): A dimension along which log_softmax will be computed.
 
     def loss(self, pred, label):
         return F.nll_loss(pred, label)
@@ -148,7 +184,12 @@ def train(dataset, task, writer):
         test_loader = loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
     # build model
-    model = GNNStack(max(dataset.num_node_features, 1), 32, dataset.num_classes, task=task)
+    model = GNNStack(input_dim=max(dataset.num_node_features, 1),
+                     hidden_dim=32,
+                     output_dim=dataset.num_classes,
+                     task=task)
+    print("len(model.convs):", len(model.convs))
+
     opt = optim.Adam(model.parameters(), lr=0.01)
 
     # train
